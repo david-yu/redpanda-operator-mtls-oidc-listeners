@@ -1,5 +1,10 @@
-# Alternative: Deploy via the Redpanda Operator CRD instead of Helm.
-# The clusterSpec mirrors the Helm values in redpanda-values.yaml.
+# Redpanda cluster with dual external Kafka listeners:
+# - oidc (port 30094 / NodePort 31094): SASL/OAUTHBEARER via Dex OIDC
+# - mtls (port 30095 / NodePort 30095): mTLS client certificate auth
+#
+# NOTE: sasl_mechanisms_overrides must be set post-deploy via rpk because
+# the map-of-lists format is not serialized correctly through bootstrap
+# config passthrough. See README.md Step 8.
 apiVersion: cluster.redpanda.com/v1alpha2
 kind: Redpanda
 metadata:
@@ -36,7 +41,7 @@ spec:
         authenticationMethod: sasl
         external:
           oidc:
-            port: 9094
+            port: 30094
             advertisedPorts:
               - 31094
             tls:
@@ -44,7 +49,7 @@ spec:
               cert: default
 
           mtls:
-            port: 9095
+            port: 30095
             authenticationMethod: mtls_identity
             tls:
               enabled: true
@@ -59,6 +64,5 @@ spec:
         oidc_discovery_url: "http://dex.dex.svc.cluster.local:5556/dex/.well-known/openid-configuration"
         oidc_token_audience: "redpanda"
         oidc_principal_mapping: "$.email"
-        sasl_mechanisms_overrides:
-          oidc:
-            - OAUTHBEARER
+        # sasl_mechanisms_overrides must be set post-deploy via rpk.
+        # See README.md Step 8 for the correct import format.

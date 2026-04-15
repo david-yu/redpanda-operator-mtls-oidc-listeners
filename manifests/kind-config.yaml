@@ -3,11 +3,11 @@ apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
     extraPortMappings:
-      # OIDC Kafka listener (NodePort)
+      # OIDC Kafka listener (NodePort 31094)
       - containerPort: 31094
         hostPort: 31094
         protocol: TCP
-      # mTLS Kafka listener (NodePort)
-      - containerPort: 31095
-        hostPort: 31095
+      # mTLS Kafka listener (NodePort 30095)
+      - containerPort: 30095
+        hostPort: 30095
         protocol: TCP

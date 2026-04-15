@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oidc-test-script
+  namespace: redpanda
+data:
+  test-oidc-client.py: |
+    import json, os, sys, time, base64, urllib.request, urllib.parse
+    from confluent_kafka import Producer, Consumer
+    from confluent_kafka.admin import AdminClient, NewTopic
+
+    dex_url = "http://dex.dex.svc.cluster.local:5556"
+    data = urllib.parse.urlencode({
+        "grant_type": "password", "client_id": "redpanda", "client_secret": "redpanda-secret",
+        "username": "user@example.com", "password": "password", "scope": "openid email profile",
+    }).encode()
+    req = urllib.request.Request(f"{dex_url}/dex/token", data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    resp = urllib.request.urlopen(req)
+    token_data = json.loads(resp.read())
+    access_token = token_data["access_token"]
+    expires_in = token_data.get("expires_in", 3600)
+    print(f"[PASS] Got OIDC token (length={len(access_token)})")
+
+    payload = access_token.split(".")[1]
+    payload += "=" * (4 - len(payload) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(payload))
+    principal = claims.get("email", "unknown")
+    print(f"[INFO] Token principal: {principal}, audience: {claims.get('aud')}")
+
+    def oauth_cb(config_str):
+        return access_token, int((time.time() + expires_in) * 1000)
+
+    # Connect to the OIDC listener via the headless service (pod DNS)
+    broker = "redpanda-0.redpanda.redpanda.svc.cluster.local:30094"
+    conf = {
+        "bootstrap.servers": broker,
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanisms": "OAUTHBEARER",
+        "enable.ssl.certificate.verification": False,
+        "oauth_cb": oauth_cb,
+    }
+
+    try:
+        admin = AdminClient(conf)
+        md = admin.list_topics(timeout=15)
+        print(f"[PASS] list_topics via OAUTHBEARER: {list(md.topics.keys())}")
+    except Exception as e:
+        print(f"[FAIL] Admin connect: {e}")
+        sys.exit(1)
+
+    print("\n=== SUMMARY ===")
+    print("[PASS] OIDC token acquisition from Dex")
+    print("[PASS] SASL/OAUTHBEARER authentication against Redpanda oidc listener")
+    print("[PASS] Metadata (list_topics) via OAUTHBEARER")
+    print("[INFO] Produce/consume require NodePort reachable from client (test from outside cluster)")
+    print("=== OIDC LISTENER VALIDATION COMPLETE ===")
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oidc-test
+  namespace: redpanda
+spec:
+  restartPolicy: Never
+  containers:
+    - name: oidc-test
+      image: python:3.12-slim
+      command:
+        - bash
+        - -c
+        - "pip install -q confluent-kafka 2>/dev/null && python /scripts/test-oidc-client.py"
+      volumeMounts:
+        - name: script
+          mountPath: /scripts
+  volumes:
+    - name: script
+      configMap:
+        name: oidc-test-script

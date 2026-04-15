@@ -10,17 +10,68 @@ Both listeners coexist on the same cluster. The OIDC configuration is cluster-le
 ## Architecture
 
 ```
-                        +-------------------+
-                        |   Kind Cluster    |
-                        |                   |
-  OIDC Client --------->| :31094 (oidc)     |----> Redpanda Broker
-  (OAUTHBEARER token)   |   auth: sasl      |       (single node)
-                        |                   |
-  mTLS Client --------->| :31095 (mtls)     |----> Redpanda Broker
-  (client certificate)  |   auth: mtls_id   |
-                        |                   |
-                        |   Dex (OIDC IdP)  |
-                        +-------------------+
+ CLIENTS (localhost)                    KIND CLUSTER
+ ==================                    ============
+
+ +------------------+
+ | OIDC Client      |    NodePort
+ |                  |    :31094         +---------------------------------------------+
+ | rpk              +------------------>|                                             |
+ |  --sasl-mechanism|    TLS + SASL    ||  Redpanda Broker (redpanda-0)               |
+ |    OAUTHBEARER   |    OAUTHBEARER   ||  +---------+  +---------+  +----------+    |
+ |  --sasl-password |                  ||  | :9092   |  | :9094   |  | :9095    |    |
+ |    token:<JWT>   |                  ||  |internal |  | oidc    |  | mtls     |    |
+ +------------------+                  ||  |auth:sasl|  |auth:sasl|  |auth:mtls |    |
+                                       ||  |         |  |OAUTHBR  |  |identity  |    |
+                                       ||  +---------+  +---------+  +----------+    |
+ +------------------+                  ||       ^            ^             ^          |
+ | mTLS Client      |    NodePort      ||       |            |             |          |
+ |                  |    :31095        ||  TLS certs    TLS certs    TLS certs +      |
+ | rpk              +------------------>|  (cert-mgr)   (cert-mgr)  client CA verify |
+ |  --tls-cert      |    TLS + client  ||                                             |
+ |    client.crt    |    certificate   |+---------------------------------------------+
+ |  --tls-key       |                  |
+ |    client.key    |                  |  +-------------------+
+ +------------------+                  |  | Dex (namespace:   |
+                                       |  |      dex)         |
+                                       |  |                   |
+           JWT validation              |  | OIDC IdP          |
+           .well-known/openid  <----------+ :5556             |
+                                       |  |                   |
+                                       |  | Static user:      |
+                                       |  | user@example.com  |
+                                       |  +-------------------+
+                                       |
+                                       +---------------------------+
+                                       | cert-manager (namespace:  |
+                                       |   cert-manager)           |
+                                       |                           |
+                                       | Issues:                   |
+                                       |  - Broker TLS certs       |
+                                       |  - mTLS client cert       |
+                                       +---------------------------+
+
+
+ AUTHENTICATION FLOW
+ ===================
+
+ OIDC Listener (port 31094):
+ +---------+     +----------+     +-----------+     +--------+
+ | Client  |---->| Redpanda |---->| Validate  |---->| Accept |
+ | sends   |     | receives |     | JWT via   |     | user:  |
+ | SASL    |     | OAUTHBR  |     | Dex OIDC  |     | email  |
+ | token   |     | token    |     | discovery |     | claim  |
+ +---------+     +----------+     +-----------+     +--------+
+
+ mTLS Listener (port 31095):
+ +---------+     +----------+     +-----------+     +--------+
+ | Client  |---->| Redpanda |---->| Verify    |---->| Accept |
+ | sends   |     | receives |     | client    |     | user:  |
+ | TLS     |     | client   |     | cert      |     | cert   |
+ | cert    |     | cert     |     | against   |     | CN     |
+ +---------+     +----------+     | trusted   |     +--------+
+                                  | CA        |
+                                  +-----------+
 ```
 
 ## Prerequisites

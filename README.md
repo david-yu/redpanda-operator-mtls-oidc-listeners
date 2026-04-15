@@ -131,27 +131,9 @@ curl -s http://localhost:5556/dex/.well-known/openid-configuration | jq .issuer
 kill %1 2>/dev/null
 ```
 
-## Step 4: Install Redpanda with Dual Listeners
-
-### Option A: Helm Chart (recommended for this demo)
+## Step 4: Install the Redpanda Operator
 
 ```bash
-helm repo add redpanda https://charts.redpanda.com --force-update
-
-kubectl create namespace redpanda
-
-helm install redpanda redpanda/redpanda \
-  --namespace redpanda \
-  --values manifests/redpanda-values.yaml \
-  --wait --timeout 10m
-```
-
-### Option B: Redpanda Operator CRD
-
-If you prefer using the operator:
-
-```bash
-# Install the operator first
 helm repo add redpanda https://charts.redpanda.com --force-update
 
 helm install redpanda-operator redpanda/operator \
@@ -159,12 +141,24 @@ helm install redpanda-operator redpanda/operator \
   --create-namespace \
   --set crds.enabled=true \
   --wait
+```
 
-# Deploy Redpanda via the CRD
+## Step 5: Deploy Redpanda with Dual Listeners
+
+The Redpanda CR in [`manifests/redpanda-cr.yaml`](manifests/redpanda-cr.yaml) configures:
+- An **oidc** listener on port 9094 with `authenticationMethod: sasl`
+- An **mtls** listener on port 9095 with `authenticationMethod: mtls_identity`
+- Cluster-level OIDC configuration pointing to Dex
+- `sasl_mechanisms_overrides` restricting the oidc listener to OAUTHBEARER only
+
+```bash
 kubectl create namespace redpanda
 kubectl apply -f manifests/redpanda-cr.yaml
+```
 
-# Wait for the cluster to become ready
+Wait for the cluster to become ready:
+
+```bash
 kubectl wait redpanda/redpanda -n redpanda --for=condition=Ready --timeout=10m
 ```
 
@@ -183,7 +177,7 @@ kubectl exec -n redpanda redpanda-0 -c redpanda -- \
 
 You should see entries for `oidc` (port 9094) and `mtls` (port 9095) alongside the internal listener.
 
-## Step 5: Extract TLS Certificates
+## Step 6: Extract TLS Certificates
 
 Extract the CA certificate (needed by both clients) and the mTLS client certificate:
 
@@ -208,7 +202,7 @@ openssl x509 -in certs/client.crt -noout -subject
 # Expected: subject=CN = mtls-client
 ```
 
-## Step 6: Validate the mTLS Listener
+## Step 7: Validate the mTLS Listener
 
 The mTLS listener on port 31095 authenticates clients via their TLS certificate. The principal is extracted from the certificate's Common Name (CN).
 
@@ -277,7 +271,7 @@ Expected output:
 }
 ```
 
-## Step 7: Validate the OIDC Listener
+## Step 8: Validate the OIDC Listener
 
 The OIDC listener on port 31094 authenticates clients via SASL/OAUTHBEARER tokens issued by Dex.
 

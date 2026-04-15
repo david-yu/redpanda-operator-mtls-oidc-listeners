@@ -1,0 +1,64 @@
+# Alternative: Deploy via the Redpanda Operator CRD instead of Helm.
+# The clusterSpec mirrors the Helm values in redpanda-values.yaml.
+apiVersion: cluster.redpanda.com/v1alpha2
+kind: Redpanda
+metadata:
+  name: redpanda
+  namespace: redpanda
+spec:
+  clusterSpec:
+    statefulset:
+      replicas: 1
+
+    tls:
+      enabled: true
+      certs:
+        default:
+          caEnabled: true
+
+    auth:
+      sasl:
+        enabled: true
+        mechanism: SCRAM-SHA-256
+        users:
+          - name: admin
+            password: admin-secret
+            mechanism: SCRAM-SHA-256
+
+    external:
+      enabled: true
+      type: NodePort
+      addresses:
+        - localhost
+
+    listeners:
+      kafka:
+        authenticationMethod: sasl
+        external:
+          oidc:
+            port: 9094
+            advertisedPorts:
+              - 31094
+            tls:
+              enabled: true
+              cert: default
+
+          mtls:
+            port: 9095
+            authenticationMethod: mtls_identity
+            tls:
+              enabled: true
+              cert: default
+              requireClientAuth: true
+
+    config:
+      cluster:
+        sasl_mechanisms:
+          - SCRAM
+          - OAUTHBEARER
+        oidc_discovery_url: "http://dex.dex.svc.cluster.local:5556/dex/.well-known/openid-configuration"
+        oidc_token_audience: "redpanda"
+        oidc_principal_mapping: "$.email"
+        sasl_mechanisms_overrides:
+          oidc:
+            - OAUTHBEARER

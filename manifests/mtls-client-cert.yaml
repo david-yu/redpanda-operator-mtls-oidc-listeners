@@ -1,0 +1,20 @@
+# cert-manager Certificate for mTLS client authentication.
+# Signed by the same CA as the Redpanda server cert so the broker trusts it.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mtls-client-cert
+  namespace: redpanda
+spec:
+  secretName: mtls-client-cert
+  duration: 8760h # 1 year
+  commonName: mtls-client
+  dnsNames:
+    - mtls-client
+  issuerRef:
+    name: redpanda-default-root-issuer
+    kind: Issuer
+    group: cert-manager.io
+  privateKey:
+    algorithm: ECDSA
+    size: 256

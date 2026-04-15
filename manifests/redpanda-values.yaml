@@ -1,0 +1,66 @@
+# Redpanda Helm chart values for dual-listener demo:
+# - OIDC/OAUTHBEARER on port 9094 (NodePort 31094)
+# - mTLS on port 9095 (NodePort 31095)
+
+statefulset:
+  replicas: 1
+
+tls:
+  enabled: true
+  certs:
+    default:
+      caEnabled: true
+
+auth:
+  sasl:
+    enabled: true
+    mechanism: SCRAM-SHA-256
+    users:
+      - name: admin
+        password: admin-secret
+        mechanism: SCRAM-SHA-256
+
+external:
+  enabled: true
+  type: NodePort
+  addresses:
+    - localhost
+
+listeners:
+  kafka:
+    authenticationMethod: sasl
+    external:
+      # Listener 1: OIDC via SASL/OAUTHBEARER
+      oidc:
+        port: 9094
+        advertisedPorts:
+          - 31094
+        tls:
+          enabled: true
+          cert: default
+
+      # Listener 2: mTLS authentication
+      mtls:
+        port: 9095
+        authenticationMethod: mtls_identity
+        tls:
+          enabled: true
+          cert: default
+          requireClientAuth: true
+
+config:
+  cluster:
+    # Enable OAUTHBEARER alongside SCRAM
+    sasl_mechanisms:
+      - SCRAM
+      - OAUTHBEARER
+
+    # OIDC provider configuration (Dex running in-cluster)
+    oidc_discovery_url: "http://dex.dex.svc.cluster.local:5556/dex/.well-known/openid-configuration"
+    oidc_token_audience: "redpanda"
+    oidc_principal_mapping: "$.email"
+
+    # v25.3+ per-listener SASL mechanism control
+    sasl_mechanisms_overrides:
+      oidc:
+        - OAUTHBEARER

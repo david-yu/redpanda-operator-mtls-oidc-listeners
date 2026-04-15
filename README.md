@@ -446,6 +446,278 @@ Results from a real Kind cluster deployment:
 
 5. **TLS hostname verification on Kind**: The auto-generated broker certificate does not include `localhost` as a SAN. Use `tls.insecure_skip_verify=true` (rpk) or `enable.ssl.certificate.verification=false` (librdkafka) for local testing.
 
+## Deploying on AKS with Microsoft Entra ID
+
+This section covers the differences when deploying on Azure Kubernetes Service using Microsoft Entra ID (formerly Azure AD) as the OIDC provider instead of Dex.
+
+### Architecture differences from the Kind demo
+
+| Aspect | Kind + Dex | AKS + Entra ID |
+|--------|-----------|----------------|
+| OIDC provider | Dex (in-cluster) | Microsoft Entra ID (cloud-hosted) |
+| Discovery URL | `http://dex.dex.svc.cluster.local:5556/dex/.well-known/openid-configuration` | `https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration` |
+| Token audience | Custom (`redpanda`) | App registration Client ID or custom `api://` URI |
+| External access | Kind NodePort + localhost | AKS LoadBalancer or Azure Application Gateway |
+| TLS certificates | cert-manager self-signed | cert-manager with Let's Encrypt, or Azure-managed certs |
+| mTLS on-prem access | N/A | Via Azure ExpressRoute private peering |
+| Network isolation | N/A | Azure NSGs + Kubernetes NetworkPolicies |
+
+### Step 1: Register Redpanda as an application in Entra ID
+
+```bash
+# Create the app registration
+az ad app create \
+  --display-name "Redpanda Kafka OIDC" \
+  --sign-in-audience AzureADMyOrg
+
+# Note the Application (client) ID — this becomes oidc_token_audience
+APP_CLIENT_ID=$(az ad app list --display-name "Redpanda Kafka OIDC" --query '[0].appId' -o tsv)
+echo "Client ID: $APP_CLIENT_ID"
+
+# Note your tenant ID
+TENANT_ID=$(az account show --query tenantId -o tsv)
+echo "Tenant ID: $TENANT_ID"
+```
+
+Optionally, create an App ID URI for a more readable audience claim:
+
+```bash
+az ad app update --id $APP_CLIENT_ID --identifier-uris "api://redpanda-kafka"
+# Now oidc_token_audience can be "api://redpanda-kafka"
+```
+
+### Step 2: Configure token claims
+
+By default, Entra ID tokens include `preferred_username` and `email` claims, but `email` may be empty for accounts without a mailbox. For reliable principal mapping, use `preferred_username` or `upn`:
+
+```bash
+# Add optional claims to the access token
+az ad app update --id $APP_CLIENT_ID --optional-claims '{
+  "accessToken": [
+    {"name": "email", "essential": false},
+    {"name": "upn", "essential": true}
+  ]
+}'
+```
+
+### Step 3: Create the AKS cluster (if not existing)
+
+```bash
+az aks create \
+  --resource-group myResourceGroup \
+  --name myAKSCluster \
+  --node-count 3 \
+  --node-vm-size Standard_D4s_v3 \
+  --enable-oidc-issuer \
+  --generate-ssh-keys
+
+az aks get-credentials --resource-group myResourceGroup --name myAKSCluster
+```
+
+### Step 4: Install cert-manager and the Redpanda operator
+
+Same as the Kind demo:
+
+```bash
+helm repo add jetstack https://charts.jetstack.io --force-update
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager --create-namespace \
+  --set crds.enabled=true --wait
+
+helm repo add redpanda https://charts.redpanda.com --force-update
+helm install redpanda-operator redpanda/operator \
+  --namespace redpanda-operator --create-namespace \
+  --set crds.enabled=true --wait
+```
+
+### Step 5: Deploy Redpanda with Entra ID OIDC
+
+The key differences from the Kind demo are in the `config.cluster` section and the `external` access type:
+
+```yaml
+apiVersion: cluster.redpanda.com/v1alpha2
+kind: Redpanda
+metadata:
+  name: redpanda
+  namespace: redpanda
+spec:
+  clusterSpec:
+    statefulset:
+      replicas: 3
+
+    tls:
+      enabled: true
+      certs:
+        default:
+          caEnabled: true
+
+    auth:
+      sasl:
+        enabled: true
+        mechanism: SCRAM-SHA-256
+        users:
+          - name: admin
+            password: change-me-in-production
+            mechanism: SCRAM-SHA-256
+
+    # Use LoadBalancer for AKS (not NodePort)
+    external:
+      enabled: true
+      type: LoadBalancer
+      # For Azure internal LB (ExpressRoute access):
+      # annotations:
+      #   service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+
+    listeners:
+      kafka:
+        authenticationMethod: sasl
+        external:
+          # OIDC listener for cloud clients (internet-facing)
+          oidc:
+            port: 30094
+            advertisedPorts:
+              - 9094
+            tls:
+              enabled: true
+              cert: default
+
+          # mTLS listener for on-prem clients (via ExpressRoute)
+          mtls:
+            port: 30095
+            authenticationMethod: mtls_identity
+            tls:
+              enabled: true
+              cert: default
+              requireClientAuth: true
+
+    config:
+      cluster:
+        sasl_mechanisms:
+          - SCRAM
+          - OAUTHBEARER
+
+        # --- Entra ID OIDC configuration ---
+        # Replace <tenant-id> with your Azure tenant ID
+        oidc_discovery_url: "https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration"
+
+        # The audience claim Redpanda checks in the JWT.
+        # Use the App Registration Client ID, or a custom URI like "api://redpanda-kafka"
+        oidc_token_audience: "<app-client-id>"
+
+        # Principal mapping — choose based on your Entra ID token claims:
+        #   $.preferred_username  — UPN (user@domain.com), always present
+        #   $.email               — email address (may be empty for some accounts)
+        #   $.oid                 — object ID (GUID, always unique)
+        oidc_principal_mapping: "$.preferred_username"
+
+        sasl_mechanisms_overrides:
+          - listener: oidc
+            sasl_mechanisms:
+              - OAUTHBEARER
+```
+
+> **`oidc_principal_mapping` gotcha**: Entra ID does not always populate the `email` claim (it depends on whether the user has an Exchange mailbox). Use `$.preferred_username` (returns `user@domain.com` for most accounts) or `$.oid` (returns the immutable Azure object ID) for reliable principal extraction.
+
+### Step 6: Obtain an Entra ID token
+
+Use the Azure CLI or a direct OAuth2 call:
+
+```bash
+# Option A: Azure CLI (requires user login)
+az login
+OIDC_TOKEN=$(az account get-access-token \
+  --resource "api://redpanda-kafka" \
+  --query accessToken -o tsv)
+
+# Option B: Client credentials flow (for service accounts / automation)
+OIDC_TOKEN=$(curl -s -X POST \
+  "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "client_id=$APP_CLIENT_ID" \
+  -d "client_secret=$APP_CLIENT_SECRET" \
+  -d "scope=api://redpanda-kafka/.default" \
+  -d "grant_type=client_credentials" | jq -r '.access_token')
+
+# Inspect the token claims
+echo "$OIDC_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{aud, preferred_username, email, oid, iss}'
+```
+
+### Step 7: Create ACLs for Entra ID principals
+
+The principal name depends on your `oidc_principal_mapping`:
+
+```bash
+# If using $.preferred_username:
+kubectl exec -n redpanda redpanda-0 -c redpanda -- \
+  rpk security acl create \
+    --allow-principal "User:alice@contoso.com" \
+    --operation all --topic '*' --group '*' --cluster
+
+# If using $.oid (Azure object ID):
+kubectl exec -n redpanda redpanda-0 -c redpanda -- \
+  rpk security acl create \
+    --allow-principal "User:a1b2c3d4-e5f6-7890-abcd-ef1234567890" \
+    --operation all --topic '*' --group '*' --cluster
+```
+
+### Step 8: Connect to the OIDC listener
+
+Once rpk supports OAUTHBEARER ([PR #30169](https://github.com/redpanda-data/redpanda/pull/30169)):
+
+```bash
+BROKER_LB=$(kubectl get svc redpanda-external -n redpanda \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+rpk topic list \
+  --brokers "$BROKER_LB:9094" \
+  -X tls.enabled=true \
+  -X tls.ca=certs/ca.crt \
+  -X sasl.mechanism=OAUTHBEARER \
+  -X "pass=token:${OIDC_TOKEN}"
+```
+
+Until then, use the `confluent-kafka` Python client or a Java Kafka client (see Step 8 in the Kind demo above).
+
+### Differences for the mTLS listener on AKS
+
+For on-prem clients connecting via Azure ExpressRoute:
+
+1. **Internal load balancer**: Add the annotation `service.beta.kubernetes.io/azure-load-balancer-internal: "true"` to route mTLS traffic over ExpressRoute rather than the public internet.
+
+2. **Client certificate CA**: On AKS, you likely want to use a corporate CA (not cert-manager self-signed) for the mTLS client certificates. Configure the Redpanda TLS cert to trust the corporate CA:
+
+   ```yaml
+   tls:
+     certs:
+       corporate-ca:
+         secretRef:
+           name: corporate-ca-secret   # pre-created Secret with your corporate CA
+         caEnabled: true
+   ```
+
+   Then reference `cert: corporate-ca` on the mTLS listener.
+
+3. **Azure NSG rules**: Ensure the Network Security Group on the AKS subnet allows:
+   - Inbound on port 9094 (OIDC listener) from internet or Application Gateway
+   - Inbound on port 9095 (mTLS listener) from the ExpressRoute CIDR only
+
+4. **DNS**: Use Azure DNS or an external DNS to map friendly names to the LoadBalancer IPs:
+   - `kafka.contoso.com` → OIDC listener (public LB IP)
+   - `kafka-internal.contoso.com` → mTLS listener (internal LB IP)
+
+### Entra ID security considerations
+
+- **Token lifetime**: Entra ID access tokens default to 1 hour. Kafka clients must refresh tokens before expiry. The `confluent-kafka` client handles this via the `oauth_cb` callback; Java clients use `login.refresh.min.period.seconds`.
+
+- **Conditional Access**: Entra ID Conditional Access policies (MFA, device compliance, IP restrictions) apply to token issuance. If your Conditional Access policy blocks token acquisition, the Kafka client will fail to authenticate. Test with a service principal if user-facing policies are restrictive.
+
+- **App roles vs groups**: For fine-grained authorization, configure App Roles in the Entra ID app registration and map them to Redpanda ACLs using `oidc_principal_mapping: "$.roles"` or a custom claim.
+
+- **Multi-tenant**: If you need clients from multiple Entra ID tenants, change the app registration to `--sign-in-audience AzureADMultipleOrgs` and use the `common` or `organizations` endpoint for `oidc_discovery_url`:
+  ```
+  https://login.microsoftonline.com/organizations/v2.0/.well-known/openid-configuration
+  ```
+
 ## Cleanup
 
 ```bash

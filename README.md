@@ -17,19 +17,19 @@ Both listeners coexist on the same cluster. The OIDC configuration is cluster-le
  │ OIDC Client      │    NodePort
  │                  │    :31094          ╔═══════════════════════════════════════════════╗
  │ rpk              ├───────────────────▶║                                               ║
- │  --sasl-mechanism│    TLS + SASL     ║  Redpanda Broker (redpanda-0)                 ║
- │    OAUTHBEARER   │    OAUTHBEARER    ║  ┌─────────┐  ┌─────────┐  ┌──────────┐      ║
- │  --sasl-password │                   ║  │ :9093   │  │ :30094  │  │ :30095   │      ║
- │    token:<JWT>   │                   ║  │internal │  │ oidc    │  │ mtls     │      ║
- └──────────────────┘                   ║  │auth:sasl│  │auth:sasl│  │auth:mtls │      ║
-                                        ║  │         │  │OAUTHBR  │  │identity  │      ║
-                                        ║  └─────────┘  └─────────┘  └──────────┘      ║
- ┌──────────────────┐                   ║       ▲            ▲             ▲            ║
- │ mTLS Client      │    NodePort       ║       │            │             │            ║
- │                  │    :30095         ║  TLS certs    TLS certs    TLS certs +        ║
- │ rpk              ├───────────────────▶║  (cert-mgr)   (cert-mgr)  client CA verify   ║
- │  --tls-cert      │    TLS + client   ║                                               ║
- │    client.crt    │    certificate    ╚═══════════════════════════════════════════════╝
+ │  --sasl-mechanism│    TLS + SASL      ║  Redpanda Broker (redpanda-0)                 ║
+ │    OAUTHBEARER   │    OAUTHBEARER     ║  ┌─────────┐  ┌─────────┐  ┌──────────┐       ║
+ │  --sasl-password │                    ║  │ :9093   │  │ :30094  │  │ :30095   │       ║
+ │    token:<JWT>   │                    ║  │internal │  │ oidc    │  │ mtls     │       ║
+ └──────────────────┘                    ║  │auth:sasl│  │auth:sasl│  │auth:mtls │       ║
+                                         ║  │         │  │OAUTHBR  │  │identity  │       ║
+                                         ║  └─────────┘  └─────────┘  └──────────┘       ║
+ ┌──────────────────┐                    ║       ▲            ▲             ▲            ║
+ │ mTLS Client      │    NodePort        ║       │            │             │            ║
+ │                  │    :30095          ║  TLS certs    TLS certs    TLS certs +        ║
+ │ rpk              ├───────────────────▶║  (cert-mgr)   (cert-mgr)  client CA verify    ║
+ │  --tls-cert      │    TLS + client    ║                                               ║
+ │    client.crt    │    certificate     ╚═══════════════════════════════════════════════╝
  │  --tls-key       │
  │    client.key    │                    ┌───────────────────┐
  └──────────────────┘                    │ Dex (namespace:   │

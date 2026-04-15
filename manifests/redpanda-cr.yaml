@@ -1,10 +1,6 @@
 # Redpanda cluster with dual external Kafka listeners:
 # - oidc (port 30094 / NodePort 31094): SASL/OAUTHBEARER via Dex OIDC
 # - mtls (port 30095 / NodePort 30095): mTLS client certificate auth
-#
-# NOTE: sasl_mechanisms_overrides must be set post-deploy via rpk because
-# the map-of-lists format is not serialized correctly through bootstrap
-# config passthrough. See README.md Step 8.
 apiVersion: cluster.redpanda.com/v1alpha2
 kind: Redpanda
 metadata:
@@ -40,6 +36,7 @@ spec:
       kafka:
         authenticationMethod: sasl
         external:
+          # Listener 1: OIDC via SASL/OAUTHBEARER
           oidc:
             port: 30094
             advertisedPorts:
@@ -48,6 +45,7 @@ spec:
               enabled: true
               cert: default
 
+          # Listener 2: mTLS client certificate authentication
           mtls:
             port: 30095
             authenticationMethod: mtls_identity
@@ -64,5 +62,9 @@ spec:
         oidc_discovery_url: "http://dex.dex.svc.cluster.local:5556/dex/.well-known/openid-configuration"
         oidc_token_audience: "redpanda"
         oidc_principal_mapping: "$.email"
-        # sasl_mechanisms_overrides must be set post-deploy via rpk.
-        # See README.md Step 8 for the correct import format.
+        # sasl_mechanisms_overrides uses the Redpanda list-of-objects format.
+        # Each entry maps a listener name to its allowed SASL mechanisms.
+        sasl_mechanisms_overrides:
+          - listener: oidc
+            sasl_mechanisms:
+              - OAUTHBEARER

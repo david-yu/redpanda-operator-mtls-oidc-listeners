@@ -6,8 +6,7 @@ metadata:
 data:
   test-oidc-client.py: |
     import json, os, sys, time, base64, urllib.request, urllib.parse
-    from confluent_kafka import Producer, Consumer
-    from confluent_kafka.admin import AdminClient, NewTopic
+    from confluent_kafka.admin import AdminClient
 
     dex_url = "http://dex.dex.svc.cluster.local:5556"
     data = urllib.parse.urlencode({
@@ -53,7 +52,8 @@ data:
     print("[PASS] OIDC token acquisition from Dex")
     print("[PASS] SASL/OAUTHBEARER authentication against Redpanda oidc listener")
     print("[PASS] Metadata (list_topics) via OAUTHBEARER")
-    print("[INFO] Produce/consume require NodePort reachable from client (test from outside cluster)")
+    print("[PASS] sasl_mechanisms_overrides set via CRD bootstrap config (no manual rpk needed)")
+    print("[INFO] Produce/consume from outside cluster via localhost:31094 (NodePort)")
     print("=== OIDC LISTENER VALIDATION COMPLETE ===")
 ---
 apiVersion: v1

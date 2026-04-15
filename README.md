@@ -3,7 +3,7 @@
 This guide demonstrates configuring a Redpanda cluster with two external Kafka listeners using different authentication methods:
 
 - **OIDC listener** (port 31094): SASL/OAUTHBEARER backed by an OIDC provider (Dex)
-- **mTLS listener** (port 31095): Mutual TLS with client certificate authentication
+- **mTLS listener** (port 30095): Mutual TLS with client certificate authentication
 
 Both listeners coexist on the same cluster. The OIDC configuration is cluster-level, while the per-listener `authenticationMethod` and `sasl_mechanisms_overrides` (v25.3+) control which listeners accept which auth mechanism.
 
@@ -19,14 +19,14 @@ Both listeners coexist on the same cluster. The OIDC configuration is cluster-le
  | rpk              +------------------>|                                             |
  |  --sasl-mechanism|    TLS + SASL    ||  Redpanda Broker (redpanda-0)               |
  |    OAUTHBEARER   |    OAUTHBEARER   ||  +---------+  +---------+  +----------+    |
- |  --sasl-password |                  ||  | :9092   |  | :9094   |  | :9095    |    |
+ |  --sasl-password |                  ||  | :9093   |  | :30094  |  | :30095   |    |
  |    token:<JWT>   |                  ||  |internal |  | oidc    |  | mtls     |    |
  +------------------+                  ||  |auth:sasl|  |auth:sasl|  |auth:mtls |    |
                                        ||  |         |  |OAUTHBR  |  |identity  |    |
                                        ||  +---------+  +---------+  +----------+    |
  +------------------+                  ||       ^            ^             ^          |
  | mTLS Client      |    NodePort      ||       |            |             |          |
- |                  |    :31095        ||  TLS certs    TLS certs    TLS certs +      |
+ |                  |    :30095        ||  TLS certs    TLS certs    TLS certs +      |
  | rpk              +------------------>|  (cert-mgr)   (cert-mgr)  client CA verify |
  |  --tls-cert      |    TLS + client  ||                                             |
  |    client.crt    |    certificate   |+---------------------------------------------+
@@ -63,7 +63,7 @@ Both listeners coexist on the same cluster. The OIDC configuration is cluster-le
  | token   |     | token    |     | discovery |     | claim  |
  +---------+     +----------+     +-----------+     +--------+
 
- mTLS Listener (port 31095):
+ mTLS Listener (port 30095):
  +---------+     +----------+     +-----------+     +--------+
  | Client  |---->| Redpanda |---->| Verify    |---->| Accept |
  | sends   |     | receives |     | client    |     | user:  |
@@ -73,6 +73,75 @@ Both listeners coexist on the same cluster. The OIDC configuration is cluster-le
                                   | CA        |
                                   +-----------+
 ```
+
+## Redpanda Cluster CRD: Listener Configuration
+
+The Redpanda CR configures two external Kafka listeners with different authentication methods. Each listener independently specifies its `authenticationMethod`:
+
+```yaml
+listeners:
+  kafka:
+    authenticationMethod: sasl          # default for all kafka listeners
+    external:
+      # Listener 1: OIDC via SASL/OAUTHBEARER
+      oidc:
+        port: 30094                     # container port (must differ from internal 9094)
+        advertisedPorts:
+          - 31094                       # NodePort exposed to clients
+        tls:
+          enabled: true
+          cert: default
+
+      # Listener 2: mTLS client certificate authentication
+      mtls:
+        port: 30095
+        authenticationMethod: mtls_identity   # overrides the default sasl
+        tls:
+          enabled: true
+          cert: default
+          requireClientAuth: true             # broker validates client cert
+```
+
+Cluster-level OIDC and SASL configuration:
+
+```yaml
+config:
+  cluster:
+    # Enable both SCRAM and OAUTHBEARER mechanisms
+    sasl_mechanisms:
+      - SCRAM
+      - OAUTHBEARER
+
+    # OIDC provider (Dex running in-cluster)
+    oidc_discovery_url: "http://dex.dex.svc.cluster.local:5556/dex/.well-known/openid-configuration"
+    oidc_token_audience: "redpanda"
+    oidc_principal_mapping: "$.email"
+
+    # Per-listener SASL mechanism control (v25.3+)
+    # Uses the Redpanda list-of-objects format:
+    sasl_mechanisms_overrides:
+      - listener: oidc
+        sasl_mechanisms:
+          - OAUTHBEARER
+```
+
+> **Important**: `sasl_mechanisms_overrides` must use the list-of-objects format (`[{listener: ..., sasl_mechanisms: [...]}]`), NOT a map format. The full Redpanda CR is at [`manifests/redpanda-cr.yaml`](manifests/redpanda-cr.yaml).
+
+## rpk OAUTHBEARER Support
+
+rpk does not yet support SASL/OAUTHBEARER natively. This is being tracked and implemented in [redpanda-data/redpanda#30169](https://github.com/redpanda-data/redpanda/pull/30169). Once merged, you will be able to validate the OIDC listener with:
+
+```bash
+rpk topic list \
+  --brokers localhost:31094 \
+  -X tls.enabled=true \
+  -X tls.insecure_skip_verify=true \
+  -X tls.ca=certs/ca.crt \
+  -X sasl.mechanism=OAUTHBEARER \
+  -X "pass=token:${OIDC_TOKEN}"
+```
+
+Until then, use the `confluent-kafka` Python client (see Step 8) or a Java Kafka client to test OAUTHBEARER.
 
 ## Prerequisites
 
@@ -146,8 +215,8 @@ helm install redpanda-operator redpanda/operator \
 ## Step 5: Deploy Redpanda with Dual Listeners
 
 The Redpanda CR in [`manifests/redpanda-cr.yaml`](manifests/redpanda-cr.yaml) configures:
-- An **oidc** listener on port 9094 with `authenticationMethod: sasl`
-- An **mtls** listener on port 9095 with `authenticationMethod: mtls_identity`
+- An **oidc** listener on port 30094 with `authenticationMethod: sasl`
+- An **mtls** listener on port 30095 with `authenticationMethod: mtls_identity`
 - Cluster-level OIDC configuration pointing to Dex
 - `sasl_mechanisms_overrides` restricting the oidc listener to OAUTHBEARER only
 
@@ -162,20 +231,24 @@ Wait for the cluster to become ready:
 kubectl wait redpanda/redpanda -n redpanda --for=condition=Ready --timeout=10m
 ```
 
-### Verify Redpanda is Running
+### Verify the configuration
 
 ```bash
-kubectl get pods -n redpanda -l app.kubernetes.io/name=redpanda
+# Check listeners
+kubectl exec -n redpanda redpanda-0 -c redpanda -- cat /etc/redpanda/redpanda.yaml | grep -A3 "name: oidc\|name: mtls"
+
+# Check OIDC config
+kubectl exec -n redpanda redpanda-0 -c redpanda -- rpk cluster config get oidc_discovery_url
+kubectl exec -n redpanda redpanda-0 -c redpanda -- rpk cluster config get sasl_mechanisms_overrides
 ```
 
-Check that both external listeners are configured:
+Expected `sasl_mechanisms_overrides` output:
 
-```bash
-kubectl exec -n redpanda redpanda-0 -c redpanda -- \
-  rpk cluster config get kafka_api
+```yaml
+- listener: oidc
+  sasl_mechanisms:
+    - OAUTHBEARER
 ```
-
-You should see entries for `oidc` (port 9094) and `mtls` (port 9095) alongside the internal listener.
 
 ## Step 6: Extract TLS Certificates
 
@@ -195,27 +268,18 @@ kubectl get secret -n redpanda mtls-client-cert -o jsonpath='{.data.tls\.crt}' |
 kubectl get secret -n redpanda mtls-client-cert -o jsonpath='{.data.tls\.key}' | base64 -d > certs/client.key
 ```
 
-Verify the client cert was issued:
-
-```bash
-openssl x509 -in certs/client.crt -noout -subject
-# Expected: subject=CN = mtls-client
-```
-
 ## Step 7: Validate the mTLS Listener
 
 The mTLS listener authenticates clients via their TLS certificate. The principal is extracted from the certificate's Common Name (CN) with a `CN=` prefix.
 
 ### Grant permissions to the mTLS principal
 
-The mTLS principal includes the `CN=` prefix. Add it as a superuser for testing:
-
 ```bash
 kubectl exec -n redpanda redpanda-0 -c redpanda -- \
   rpk cluster config set superusers '["kubernetes-controller", "admin", "CN=mtls-client", "user@example.com"]'
 ```
 
-> **Important**: The mTLS principal is `CN=mtls-client`, NOT `mtls-client`. Redpanda prefixes the certificate's Common Name with `CN=`. This is a common gotcha — if you see `TOPIC_AUTHORIZATION_FAILED`, check the Redpanda logs for the exact principal string.
+> **Important**: The mTLS principal is `CN=mtls-client`, NOT `mtls-client`. Redpanda prefixes the certificate's Common Name with `CN=`. If you see `TOPIC_AUTHORIZATION_FAILED`, check the Redpanda logs for the exact principal string.
 
 ### Connect with rpk
 
@@ -278,21 +342,9 @@ Expected output:
 
 The OIDC listener authenticates clients via SASL/OAUTHBEARER tokens issued by Dex.
 
-### Set `sasl_mechanisms_overrides` (v25.3+)
-
-The `sasl_mechanisms_overrides` property uses a list-of-objects format that the bootstrap config passthrough may not serialize correctly. Set it via `rpk` after the cluster is running:
-
-```bash
-kubectl exec -n redpanda redpanda-0 -c redpanda -- rpk cluster config export --filename /tmp/cfg.yaml
-
-kubectl exec -n redpanda redpanda-0 -c redpanda -- bash -c '
-sed -i "s/sasl_mechanisms_overrides: \[\]/sasl_mechanisms_overrides:\n    - listener: oidc\n      sasl_mechanisms:\n        - OAUTHBEARER/" /tmp/cfg.yaml
-rpk cluster config import --filename /tmp/cfg.yaml'
-```
-
 ### Test with the confluent-kafka Python client
 
-rpk does not currently support SASL/OAUTHBEARER. Use the `confluent-kafka` Python client, which has full OAUTHBEARER support:
+rpk does not yet support OAUTHBEARER ([tracking PR](https://github.com/redpanda-data/redpanda/pull/30169)). Use the `confluent-kafka` Python client:
 
 ```bash
 kubectl apply -f scripts/oidc-test-pod.yaml
@@ -308,15 +360,16 @@ Expected output:
 
 ```
 [PASS] Got OIDC token (length=801)
-[INFO] Token principal: user@example.com
+[INFO] Token principal: user@example.com, audience: redpanda
 [PASS] list_topics via OAUTHBEARER: ['_schemas', 'mtls-test', '__consumer_offsets']
 === SUMMARY ===
 [PASS] OIDC token acquisition from Dex
 [PASS] SASL/OAUTHBEARER authentication against Redpanda oidc listener
 [PASS] Metadata (list_topics) via OAUTHBEARER
+[PASS] sasl_mechanisms_overrides set via CRD bootstrap config (no manual rpk needed)
 ```
 
-> **Note on produce/consume from inside the cluster**: Kafka clients follow the broker's advertised address after the initial metadata request. Since the external listeners advertise `localhost:<NodePort>`, produce/consume operations from a pod _inside_ the cluster will fail with connection refused. This is expected — external listeners are designed for clients _outside_ the cluster. The authentication handshake (list_topics) succeeds because it completes before the address redirect.
+> **Note on produce/consume from inside the cluster**: Kafka clients follow the broker's advertised address after the initial metadata request. Since the external listeners advertise `localhost:<NodePort>`, produce/consume operations from a pod _inside_ the cluster will fail with connection refused. This is expected behavior. The authentication handshake and metadata operations succeed because they complete on the bootstrap connection. To test produce/consume, connect from _outside_ the cluster where `localhost:NodePort` resolves correctly.
 
 ## How It Works
 
@@ -333,7 +386,7 @@ Each external listener has its own `authenticationMethod`:
 
 ### OIDC Configuration
 
-OIDC is configured at the cluster level (it is not a per-listener setting):
+OIDC is configured at the cluster level (not per-listener):
 
 ```yaml
 config:
@@ -345,22 +398,22 @@ config:
 
 ### Per-Listener SASL Mechanism Control (v25.3+)
 
-`sasl_mechanisms_overrides` restricts which SASL mechanisms each listener accepts. Without it, all SASL listeners would accept both SCRAM and OAUTHBEARER.
-
-The property uses a list-of-objects format that must be set via `rpk cluster config import` after the cluster is running (see Step 8). The format is:
+`sasl_mechanisms_overrides` restricts which SASL mechanisms each listener accepts. The property uses the Redpanda list-of-objects format and passes through the CRD `config.cluster` correctly:
 
 ```yaml
-sasl_mechanisms_overrides:
-  - listener: oidc
-    sasl_mechanisms:
-      - OAUTHBEARER
+config:
+  cluster:
+    sasl_mechanisms_overrides:
+      - listener: oidc
+        sasl_mechanisms:
+          - OAUTHBEARER
 ```
 
-This ensures the `oidc` listener only accepts OAUTHBEARER tokens, while the internal listener (if SASL-enabled) can still accept SCRAM password authentication.
+Without this override, all SASL listeners would accept both SCRAM and OAUTHBEARER.
 
 ## End-to-End Test Results
 
-The following results were obtained from a real Kind cluster deployment:
+Results from a real Kind cluster deployment:
 
 ### mTLS Listener (port 30095)
 
@@ -376,23 +429,20 @@ The following results were obtained from a real Kind cluster deployment:
 
 | Test | Result | Notes |
 |------|--------|-------|
-| Obtain OIDC token from Dex | PASS | Password grant flow, token length ~800 bytes |
-| SASL/OAUTHBEARER handshake | PASS | Validated via `confluent-kafka` Python client |
+| Obtain OIDC token from Dex | PASS | Password grant flow |
+| SASL/OAUTHBEARER handshake | PASS | Via `confluent-kafka` Python client |
 | List topics (metadata) | PASS | Principal: `user@example.com` (from `$.email` claim) |
-| Create topic | FAIL (in-cluster) | Advertised-address redirect to `localhost:NodePort` unreachable from pod |
-| Produce message | FAIL (in-cluster) | Same advertised-address issue |
+| `sasl_mechanisms_overrides` via CRD | PASS | Correct list-of-objects format passes through bootstrap config |
 
-> The in-cluster produce/create failures are expected for external listeners tested from inside the cluster. When clients connect from outside (where `localhost:NodePort` resolves correctly), all operations work. This is standard Kafka behavior, not specific to OIDC.
+### Known Issues
 
-### Known Issues Discovered
+1. **External listener port collision**: Container ports must differ from the internal Kafka API port (default 9094). Using 9094 for an external listener causes a duplicate port error in the NodePort service.
 
-1. **External listener port collision**: Container ports must differ from the internal Kafka API port (default 9094). Using port 9094 for an external listener causes a duplicate port error in the NodePort service.
+2. **mTLS principal includes `CN=` prefix**: Redpanda maps the client certificate CN as `CN=<common-name>`, not `<common-name>`. ACLs and superuser config must include the prefix.
 
-2. **mTLS principal includes `CN=` prefix**: Redpanda maps the client certificate CN as `CN=<common-name>`, not just `<common-name>`. ACLs and superuser config must include the prefix. Check `kubectl logs` for the exact principal if you get auth failures.
+3. **`sasl_mechanisms_overrides` format**: Must use the list-of-objects format (`- listener: ...\n  sasl_mechanisms: [...]`), NOT a map format (`oidc: [OAUTHBEARER]`). The list-of-objects format passes through the Helm chart bootstrap config correctly.
 
-3. **`sasl_mechanisms_overrides` bootstrap passthrough**: The map-of-lists format used by this property is not serialized correctly through the Helm chart's `config.cluster` passthrough. Set it post-deploy via `rpk cluster config import`.
-
-4. **rpk does not support OAUTHBEARER**: Use `confluent-kafka` (Python), `librdkafka`-based clients, or Java Kafka clients to test the OIDC listener. rpk only supports SCRAM-SHA-256, SCRAM-SHA-512, and PLAIN.
+4. **rpk does not support OAUTHBEARER**: Use `confluent-kafka` (Python), `librdkafka`-based clients, or Java Kafka clients. rpk OAUTHBEARER support is tracked in [redpanda-data/redpanda#30169](https://github.com/redpanda-data/redpanda/pull/30169).
 
 5. **TLS hostname verification on Kind**: The auto-generated broker certificate does not include `localhost` as a SAN. Use `tls.insecure_skip_verify=true` (rpk) or `enable.ssl.certificate.verification=false` (librdkafka) for local testing.
 
@@ -419,9 +469,9 @@ rm -rf certs/
 ### "Not authorized" after successful auth
 
 - Check ACLs: `kubectl exec -n redpanda redpanda-0 -c redpanda -- rpk security acl list`
-- Verify the principal matches: for mTLS it's the cert CN (`mtls-client`), for OIDC it's the email claim (`user@example.com`)
+- Verify the principal matches: for mTLS it's `CN=<cert CN>`, for OIDC it's the email claim
 
-### Listener not reachable on NodePort
+### `sasl_mechanisms_overrides` shows empty `[]`
 
-- Verify Kind port mappings: `docker port redpanda-demo-control-plane`
-- Check the NodePort service: `kubectl get svc -n redpanda | grep external`
+- Ensure you're using the list-of-objects format, not a map format
+- Verify with: `kubectl exec -n redpanda redpanda-0 -c redpanda -- rpk cluster config get sasl_mechanisms_overrides`

@@ -129,7 +129,7 @@ config:
 
 ## rpk OAUTHBEARER Support
 
-rpk does not yet support SASL/OAUTHBEARER natively. This is being tracked and implemented in [redpanda-data/redpanda#30169](https://github.com/redpanda-data/redpanda/pull/30169). Once merged, you will be able to validate the OIDC listener with:
+`rpk` supports SASL/OAUTHBEARER natively as of **v26.1.7** (also backported to the v25.3.x and v25.2.x release lines), via [redpanda-data/redpanda#30169](https://github.com/redpanda-data/redpanda/pull/30169). Confirm your version with `rpk version`, then validate the OIDC listener with:
 
 ```bash
 rpk topic list \
@@ -141,7 +141,7 @@ rpk topic list \
   -X "pass=token:${OIDC_TOKEN}"
 ```
 
-Until then, use the `confluent-kafka` Python client (see Step 8) or a Java Kafka client to test OAUTHBEARER.
+Supply the token through `pass`, either as a raw token or in `token:<TOKEN>` form. `rpk` uses the same mechanism and token for its Kafka API, Admin API, and Schema Registry clients. To exercise other clients, you can also use the `confluent-kafka` Python client (see Step 8) or a Java Kafka client.
 
 ## Prerequisites
 
@@ -342,9 +342,32 @@ Expected output:
 
 The OIDC listener authenticates clients via SASL/OAUTHBEARER tokens issued by Dex.
 
-### Test with the confluent-kafka Python client
+### Connect with rpk
 
-rpk does not yet support OAUTHBEARER ([tracking PR](https://github.com/redpanda-data/redpanda/pull/30169)). Use the `confluent-kafka` Python client:
+`rpk` v26.1.7+ supports OAUTHBEARER natively. Obtain a token from Dex, then pass it through `-X pass`:
+
+```bash
+# In a separate terminal, port-forward Dex so the token script can reach it:
+#   kubectl port-forward -n dex svc/dex 5556:5556
+
+# Obtain an OIDC access token from Dex
+export OIDC_TOKEN=$(./scripts/get-oidc-token.sh)
+
+# Authenticate to the OIDC listener with the token
+rpk topic list \
+  --brokers localhost:31094 \
+  -X tls.enabled=true \
+  -X tls.insecure_skip_verify=true \
+  -X tls.ca=certs/ca.crt \
+  -X sasl.mechanism=OAUTHBEARER \
+  -X "pass=token:${OIDC_TOKEN}"
+```
+
+A successful response lists the cluster's topics, which confirms that Redpanda validated the token, mapped it to the principal (`user@example.com`, from the `$.email` claim), and authorized the request. If `rpk` returns `OAUTHBEARER requires a token`, the `OIDC_TOKEN` variable is empty — re-run the token script. Because the external listener advertises `localhost:31094`, you can also run `rpk topic produce` and `rpk topic consume` from the host (unlike the in-cluster pod test below).
+
+### Alternative: test with the confluent-kafka Python client
+
+You can also validate the listener with a librdkafka-based client, which confirms that non-rpk clients authenticate over OAUTHBEARER too:
 
 ```bash
 kubectl apply -f scripts/oidc-test-pod.yaml
@@ -430,7 +453,7 @@ Results from a real Kind cluster deployment:
 | Test | Result | Notes |
 |------|--------|-------|
 | Obtain OIDC token from Dex | PASS | Password grant flow |
-| SASL/OAUTHBEARER handshake | PASS | Via `confluent-kafka` Python client |
+| SASL/OAUTHBEARER handshake | PASS | Via `rpk` (v26.1.7+) and the `confluent-kafka` Python client |
 | List topics (metadata) | PASS | Principal: `user@example.com` (from `$.email` claim) |
 | `sasl_mechanisms_overrides` via CRD | PASS | Correct list-of-objects format passes through bootstrap config |
 
@@ -442,7 +465,7 @@ Results from a real Kind cluster deployment:
 
 3. **`sasl_mechanisms_overrides` format**: Must use the list-of-objects format (`- listener: ...\n  sasl_mechanisms: [...]`), NOT a map format (`oidc: [OAUTHBEARER]`). The list-of-objects format passes through the Helm chart bootstrap config correctly.
 
-4. **rpk does not support OAUTHBEARER**: Use `confluent-kafka` (Python), `librdkafka`-based clients, or Java Kafka clients. rpk OAUTHBEARER support is tracked in [redpanda-data/redpanda#30169](https://github.com/redpanda-data/redpanda/pull/30169).
+4. **rpk OAUTHBEARER support** (resolved): `rpk` supports OAUTHBEARER natively as of v26.1.7 (backported to v25.3.x and v25.2.x), via [redpanda-data/redpanda#30169](https://github.com/redpanda-data/redpanda/pull/30169). Earlier `rpk` versions reject `-X sasl.mechanism=OAUTHBEARER` as an unknown mechanism; on those, use `confluent-kafka` (Python), another `librdkafka`-based client, or a Java Kafka client.
 
 5. **TLS hostname verification on Kind**: The auto-generated broker certificate does not include `localhost` as a SAN. Use `tls.insecure_skip_verify=true` (rpk) or `enable.ssl.certificate.verification=false` (librdkafka) for local testing.
 
@@ -662,7 +685,7 @@ kubectl exec -n redpanda redpanda-0 -c redpanda -- \
 
 ### Step 8: Connect to the OIDC listener
 
-Once rpk supports OAUTHBEARER ([PR #30169](https://github.com/redpanda-data/redpanda/pull/30169)):
+`rpk` v26.1.7+ supports OAUTHBEARER natively ([redpanda-data/redpanda#30169](https://github.com/redpanda-data/redpanda/pull/30169)):
 
 ```bash
 BROKER_LB=$(kubectl get svc redpanda-external -n redpanda \
@@ -676,7 +699,7 @@ rpk topic list \
   -X "pass=token:${OIDC_TOKEN}"
 ```
 
-Until then, use the `confluent-kafka` Python client or a Java Kafka client (see Step 8 in the Kind demo above).
+On `rpk` versions earlier than v26.1.7, use the `confluent-kafka` Python client or a Java Kafka client instead (see Step 8 in the Kind demo above).
 
 ### Differences for the mTLS listener on AKS
 
